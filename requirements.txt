@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+tensorflow
+numpy
+opencv-python
+h5py
+python-multipart
+transformers
+torch
+pillow
