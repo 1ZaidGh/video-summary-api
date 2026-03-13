@@ -1,4 +1,25 @@
+# Dataset file (457MB - too large)
 SumMe.h5
-model.h5
+
+# Video files
+*.mp4
+temp_*
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+
+# HuggingFace cache
+.cache/
+
+# Virtual environment
+venv/
+env/
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db

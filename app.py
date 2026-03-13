@@ -1,223 +1,165 @@
 import cv2
-import h5py
 import numpy as np
 import tensorflow as tf
 from fastapi import FastAPI, UploadFile, File
 import shutil
 import os
 
+from transformers import BlipProcessor, BlipForConditionalGeneration
+from PIL import Image
+
 app = FastAPI()
 
 MODEL_PATH = "model.h5"
-DATASET_PATH = "SumMe.h5"
-
-MAX_LEN = 500
-
 
 # -------------------------
-# Pad sequences for training
+# CNN Feature extractor
 # -------------------------
-def pad_sequences(features, labels):
+cnn = tf.keras.applications.MobileNetV2(
+    weights="imagenet",
+    include_top=False,
+    pooling="avg"
+)
 
-    padded_X = []
-    padded_Y = []
-
-    for f, l in zip(features, labels):
-
-        length = min(len(f), MAX_LEN)
-
-        x = f[:length]
-        y = l[:length]
-
-        if length < MAX_LEN:
-
-            pad_x = np.zeros((MAX_LEN - length, f.shape[1]))
-            pad_y = np.zeros((MAX_LEN - length,))
-
-            x = np.vstack([x, pad_x])
-            y = np.concatenate([y, pad_y])
-
-        padded_X.append(x)
-        padded_Y.append(y)
-
-    return np.array(padded_X), np.array(padded_Y)
-
+# project 1280 → 512
+feature_projection = tf.keras.layers.Dense(512)
 
 # -------------------------
-# Load dataset
+# Caption model
 # -------------------------
-def load_dataset():
+processor = BlipProcessor.from_pretrained(
+    "Salesforce/blip-image-captioning-base"
+)
 
-    dataset = []
-
-    with h5py.File(DATASET_PATH, "r") as f:
-
-        for key in f.keys():
-
-            video = f[key]
-
-            features = np.array(video["feature"])
-            scores = np.array(video["label"])
-
-            dataset.append((features, scores))
-
-    return dataset
-
+caption_model = BlipForConditionalGeneration.from_pretrained(
+    "Salesforce/blip-image-captioning-base"
+)
 
 # -------------------------
-# Build model
+# Load summarization model
 # -------------------------
-def build_model(input_dim):
-
-    inputs = tf.keras.Input(shape=(None, input_dim))
-
-    x = tf.keras.layers.Bidirectional(
-        tf.keras.layers.LSTM(128, return_sequences=True)
-    )(inputs)
-
-    x = tf.keras.layers.Dense(64, activation="relu")(x)
-
-    outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
-
-    model = tf.keras.Model(inputs, outputs)
-
-    model.compile(
-        optimizer="adam",
-        loss="mse"
-    )
-
-    return model
-
-
-# -------------------------
-# Train model
-# -------------------------
-def train_model():
-
-    dataset = load_dataset()
-
-    features = []
-    scores = []
-
-    for f, s in dataset:
-        features.append(f)
-        scores.append(s)
-
-    X, Y = pad_sequences(features, scores)
-
-    input_dim = X.shape[2]
-
-    model = build_model(input_dim)
-
-    model.fit(
-        X,
-        Y,
-        epochs=5,
-        batch_size=2
-    )
-
-    model.save(MODEL_PATH)
-
-    return model
-
-
-# -------------------------
-# Load model
-# -------------------------
-if os.path.exists(MODEL_PATH):
-
-    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
-
-else:
-
-    print("Training model...")
-    model = train_model()
+model = tf.keras.models.load_model(MODEL_PATH, compile=False)
 
 
 # -------------------------
 # Extract frames
 # -------------------------
 def extract_frames(video_path):
-
     cap = cv2.VideoCapture(video_path)
-
     frames = []
+    fps = cap.get(cv2.CAP_PROP_FPS)
 
     while True:
-
         ret, frame = cap.read()
-
         if not ret:
             break
-
-        frame = cv2.resize(frame, (224,224))
-
+        frame = cv2.resize(frame, (224, 224))
         frames.append(frame)
 
     cap.release()
-
-    return np.array(frames)
-
-
-# -------------------------
-# Convert scores to text
-# -------------------------
-def scores_to_text(scores):
-
-    threshold = 0.5
-    important_frames = np.where(scores > threshold)[0]
-
-    if len(important_frames) == 0:
-        return "No important events were detected in the video."
-
-    segments = []
-    start = important_frames[0]
-
-    for i in range(1, len(important_frames)):
-
-        if important_frames[i] != important_frames[i-1] + 1:
-            segments.append((start, important_frames[i-1]))
-            start = important_frames[i]
-
-    segments.append((start, important_frames[-1]))
-
-    sentences = []
-
-    for i, (s, e) in enumerate(segments):
-
-        sentences.append(
-            f"Event {i+1} occurs between frame {s} and {e}."
-        )
-
-    return " ".join(sentences)
+    return np.array(frames), fps
 
 
 # -------------------------
-# API endpoint
+# Extract CNN features
+# -------------------------
+def extract_features(frames):
+    frames_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(
+        frames.astype(np.float32)
+    )
+    features = cnn.predict(frames_preprocessed, verbose=0)
+    features = feature_projection(features)
+    return features.numpy()
+
+
+# -------------------------
+# Caption a frame
+# -------------------------
+def caption_frame(frame):
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(rgb)
+    inputs = processor(images=image, return_tensors="pt")
+    out = caption_model.generate(**inputs, max_new_tokens=30)
+    caption = processor.decode(out[0], skip_special_tokens=True)
+    return caption
+
+
+# -------------------------
+# Get all scenes with timestamps
+# -------------------------
+def get_all_scenes(frames, fps, step=100):
+    captions = []
+    seen = set()
+    indices = range(0, len(frames), step)
+
+    for idx in indices:
+        caption = caption_frame(frames[idx])
+
+        # Skip duplicate captions
+        if caption not in seen:
+            seen.add(caption)
+            timestamp = idx / fps if fps > 0 else idx / 30
+            minutes = int(timestamp // 60)
+            seconds = int(timestamp % 60)
+            captions.append({
+                "timestamp": f"{minutes:02d}:{seconds:02d}",
+                "frame": int(idx),
+                "caption": caption
+            })
+
+    return captions
+
+
+# -------------------------
+# API endpoint - full scene list
 # -------------------------
 @app.post("/summarize")
-
 async def summarize_video(file: UploadFile = File(...)):
-
     path = f"temp_{file.filename}"
 
     with open(path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    frames = extract_frames(path)
+    try:
+        frames, fps = extract_frames(path)
 
-    frames = frames / 255.0
+        if len(frames) == 0:
+            return {"error": "Could not extract frames from video."}
 
-    frames = np.expand_dims(frames, axis=0)
+        print(f"✅ Extracted {len(frames)} frames at {fps:.1f} fps")
 
-    scores = model.predict(frames)[0].flatten()
+        # Get all scenes (every ~3 seconds by default)
+        scenes = get_all_scenes(frames, fps, step=100)
 
-    summary_text = scores_to_text(scores)
+        # Also build a plain text summary
+        summary = ". ".join([s["caption"] for s in scenes])
+        if not summary.endswith("."):
+            summary += "."
 
-    return {
-        "summary": summary_text
-    }
+        return {
+            "total_frames": len(frames),
+            "fps": round(fps, 2),
+            "scenes_found": len(scenes),
+            "scenes": scenes,
+            "summary": summary
+        }
 
-    if __name__ == "__main__":
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+# -------------------------
+# Home endpoint
+# -------------------------
+@app.get("/")
+def home():
+    return {"message": "Video summarization API running"}
+
+
+# -------------------------
+# Run server
+# -------------------------
+if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
