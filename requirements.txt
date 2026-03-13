@@ -2,7 +2,7 @@ fastapi
 uvicorn
 tensorflow
 numpy
-opencv-python
+opencv-python-headless
 h5py
 python-multipart
 transformers
