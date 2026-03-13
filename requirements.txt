@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-tensorflow
+tensorflow==2.13.0
 numpy
 opencv-python-headless
 h5py
