@@ -11,8 +11,7 @@ MODEL_PATH = "model.h5"
 # Global model variables (loaded lazily)
 cnn = None
 feature_projection = None
-processor = None
-caption_model = None
+caption_pipeline = None
 summarization_model = None
 
 
@@ -20,11 +19,11 @@ summarization_model = None
 # Lazy model loader
 # -------------------------
 def load_models():
-    global cnn, feature_projection, processor, caption_model, summarization_model
+    global cnn, feature_projection, caption_pipeline, summarization_model
 
     if cnn is None:
         import tensorflow as tf
-        from transformers import BlipProcessor, BlipForConditionalGeneration
+        from transformers import pipeline
 
         print("Loading MobileNetV2...")
         cnn = tf.keras.applications.MobileNetV2(
@@ -34,12 +33,11 @@ def load_models():
         )
         feature_projection = tf.keras.layers.Dense(512)
 
-        print("Loading BLIP...")
-        processor = BlipProcessor.from_pretrained(
-            "Salesforce/blip-image-captioning-base"
-        )
-        caption_model = BlipForConditionalGeneration.from_pretrained(
-            "Salesforce/blip-image-captioning-base"
+        print("Loading captioning model...")
+        caption_pipeline = pipeline(
+            "image-to-text",
+            model="nlpconnect/vit-gpt2-image-captioning",
+            max_new_tokens=30
         )
 
         print("Loading summarization model...")
@@ -89,10 +87,8 @@ def caption_frame(frame):
     from PIL import Image
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     image = Image.fromarray(rgb)
-    inputs = processor(images=image, return_tensors="pt")
-    out = caption_model.generate(**inputs, max_new_tokens=30)
-    caption = processor.decode(out[0], skip_special_tokens=True)
-    return caption
+    result = caption_pipeline(image)
+    return result[0]["generated_text"]
 
 
 # -------------------------
@@ -174,6 +170,5 @@ async def summarize_video(file: UploadFile = File(...)):
 # -------------------------
 if __name__ == "__main__":
     import uvicorn
-    import os
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)

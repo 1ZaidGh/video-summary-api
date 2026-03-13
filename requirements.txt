@@ -6,5 +6,5 @@ opencv-python-headless
 h5py
 python-multipart
 transformers
-torch
 pillow
+torch
