@@ -1,44 +1,53 @@
 import cv2
 import numpy as np
-import tensorflow as tf
 from fastapi import FastAPI, UploadFile, File
 import shutil
 import os
-
-from transformers import BlipProcessor, BlipForConditionalGeneration
-from PIL import Image
 
 app = FastAPI()
 
 MODEL_PATH = "model.h5"
 
-# -------------------------
-# CNN Feature extractor
-# -------------------------
-cnn = tf.keras.applications.MobileNetV2(
-    weights="imagenet",
-    include_top=False,
-    pooling="avg"
-)
+# Global model variables (loaded lazily)
+cnn = None
+feature_projection = None
+processor = None
+caption_model = None
+summarization_model = None
 
-# project 1280 → 512
-feature_projection = tf.keras.layers.Dense(512)
 
 # -------------------------
-# Caption model
+# Lazy model loader
 # -------------------------
-processor = BlipProcessor.from_pretrained(
-    "Salesforce/blip-image-captioning-base"
-)
+def load_models():
+    global cnn, feature_projection, processor, caption_model, summarization_model
 
-caption_model = BlipForConditionalGeneration.from_pretrained(
-    "Salesforce/blip-image-captioning-base"
-)
+    if cnn is None:
+        import tensorflow as tf
+        from transformers import BlipProcessor, BlipForConditionalGeneration
 
-# -------------------------
-# Load summarization model
-# -------------------------
-model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+        print("Loading MobileNetV2...")
+        cnn = tf.keras.applications.MobileNetV2(
+            weights="imagenet",
+            include_top=False,
+            pooling="avg"
+        )
+        feature_projection = tf.keras.layers.Dense(512)
+
+        print("Loading BLIP...")
+        processor = BlipProcessor.from_pretrained(
+            "Salesforce/blip-image-captioning-base"
+        )
+        caption_model = BlipForConditionalGeneration.from_pretrained(
+            "Salesforce/blip-image-captioning-base"
+        )
+
+        print("Loading summarization model...")
+        summarization_model = tf.keras.models.load_model(
+            MODEL_PATH, compile=False
+        )
+
+        print("✅ All models loaded!")
 
 
 # -------------------------
@@ -64,6 +73,7 @@ def extract_frames(video_path):
 # Extract CNN features
 # -------------------------
 def extract_features(frames):
+    import tensorflow as tf
     frames_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(
         frames.astype(np.float32)
     )
@@ -76,6 +86,7 @@ def extract_features(frames):
 # Caption a frame
 # -------------------------
 def caption_frame(frame):
+    from PIL import Image
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     image = Image.fromarray(rgb)
     inputs = processor(images=image, return_tensors="pt")
@@ -95,7 +106,6 @@ def get_all_scenes(frames, fps, step=100):
     for idx in indices:
         caption = caption_frame(frames[idx])
 
-        # Skip duplicate captions
         if caption not in seen:
             seen.add(caption)
             timestamp = idx / fps if fps > 0 else idx / 30
@@ -111,10 +121,22 @@ def get_all_scenes(frames, fps, step=100):
 
 
 # -------------------------
-# API endpoint - full scene list
+# Home endpoint
+# -------------------------
+@app.get("/")
+def home():
+    return {"message": "Video summarization API running"}
+
+
+# -------------------------
+# API endpoint
 # -------------------------
 @app.post("/summarize")
 async def summarize_video(file: UploadFile = File(...)):
+
+    # Load models on first request
+    load_models()
+
     path = f"temp_{file.filename}"
 
     with open(path, "wb") as buffer:
@@ -128,10 +150,8 @@ async def summarize_video(file: UploadFile = File(...)):
 
         print(f"✅ Extracted {len(frames)} frames at {fps:.1f} fps")
 
-        # Get all scenes (every ~3 seconds by default)
         scenes = get_all_scenes(frames, fps, step=100)
 
-        # Also build a plain text summary
         summary = ". ".join([s["caption"] for s in scenes])
         if not summary.endswith("."):
             summary += "."
@@ -147,14 +167,6 @@ async def summarize_video(file: UploadFile = File(...)):
     finally:
         if os.path.exists(path):
             os.remove(path)
-
-
-# -------------------------
-# Home endpoint
-# -------------------------
-@app.get("/")
-def home():
-    return {"message": "Video summarization API running"}
 
 
 # -------------------------
